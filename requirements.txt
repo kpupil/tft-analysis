@@ -1,0 +1,8 @@
+# --- HTTP / 采集 ---
+httpx[http2]==0.27.2          # 异步并发抓取 Riot API
+tenacity==9.0.0               # 重试（429 / 5xx 退避）
+
+# --- 配置 / 校验 ---
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
