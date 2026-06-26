@@ -6,3 +6,7 @@ tenacity==9.0.0               # 重试（429 / 5xx 退避）
 pydantic==2.9.2
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
+
+# --- 数据库 ---
+SQLAlchemy==2.0.36             # 采集状态与 raw match 主存储
+psycopg[binary]==3.2.3         # PostgreSQL 驱动（服务器部署）

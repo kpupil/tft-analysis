@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     rate_per_second: int = 20
     rate_per_two_min: int = 100
     max_matches_per_player: int = 20
+    fetch_batch_size: int = 200
+
+    # 服务器建议使用 PostgreSQL；默认 SQLite 只用于本地开发/测试快速启动。
+    database_url: str = "sqlite:///tft_analysis.db"
 
     # 种子玩家最低段位。
     min_tier: str = "GRANDMASTER"

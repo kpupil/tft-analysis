@@ -1,76 +1,103 @@
-# TFT Analysis — 对局采集
+# TFT Analysis — 数据库采集
 
-只负责一件事：从 Riot API 把高分段对局原始 JSON 抓到本地。
-解析、入库、聚合、聚类等留给你自己实现。
+当前阶段只做一件事：持续采集高分段 TFT 排位对局，并把采集状态与 Riot 原始
+match JSON 存进数据库。解析、聚合、阵容统计、聚类等分析层后续再做。
 
-## 流程
-
-```
-宗师/王者榜单种子 → 每个玩家的 match id 列表 → 拉取每局 match JSON → 存到 data/raw/
-```
-
-## 目录结构
+## 生产形态
 
 ```
-tft-analysis/
-├── app/
-│   ├── core/
-│   │   ├── config.py        # 配置（全部走 .env，dev/prod 通用）
-│   │   ├── rate_limiter.py  # 进程内滑动窗口限流（1s + 120s 双窗口）
-│   │   └── riot_client.py   # Riot API 异步客户端（429/5xx 退避重试）
-│   └── collector/
-│       ├── seed.py          # 拉各区域宗师/王者榜单 → data/seeds/{region}.json
-│       └── collect.py       # 抓对局原始 JSON → data/raw/{match_id}.json
-├── requirements.txt
-├── .env.example
-└── .env                     # 你的 key（已被 .gitignore 忽略）
+榜单种子玩家 -> 发现 match id -> 入队 -> 拉 match detail -> raw_matches.raw_json
 ```
 
-## 用法
+采集链路拆成三步：
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-python -m app.collector.seed      # 1. 拉榜单种子玩家
-python -m app.collector.collect   # 2. 抓对局，落到 data/raw/
+python -m app.collector.seed       # 1. 拉宗师/王者榜单，写 seed_players
+python -m app.collector.discover   # 2. 按种子玩家发现 match id，写 match_discovery
+python -m app.collector.collect    # 3. 从队列抓 match detail，写 raw_matches
 ```
 
-原始数据就在 `data/raw/*.json`，每个文件是一局完整的 tft-match-v1 响应。
+初始化数据库：
 
-## 去重 / 续传
+```bash
+python -m app.core.init_db
+```
 
-- **采集去重**：抓之前检查 `data/raw/{match_id}.json` 是否已存在，存在即跳过。
-  同一局被多个种子玩家共享时只抓一次。
-- **可中断续传**：`collect` 随时 Ctrl+C，再跑会自动跳过已抓的对局。
+## 数据库选择
 
-## 配置（.env）
+服务器部署建议使用 PostgreSQL。采集阶段需要可靠的唯一约束、状态更新、失败重试、
+JSON 原文存储和后续查询索引，PostgreSQL 比文件目录、SQLite 或 DuckDB 更适合作为
+主采集库。
+
+本地默认 `DATABASE_URL=sqlite:///tft_analysis.db` 只是为了快速开发验证。部署到
+服务器时请改成 PostgreSQL：
+
+```env
+DATABASE_URL=postgresql+psycopg://tft:password@127.0.0.1:5432/tft_analysis
+```
+
+## 核心表
+
+`seed_players`
+
+- 当前种子玩家池，按 `platform + puuid` 去重。
+- 保存 tier、LP、胜负、最后一次榜单刷新时间。
+
+`match_discovery`
+
+- match id 队列，`match_id` 全局唯一。
+- `status` 可为 `pending`、`retry`、`fetched`、`skipped`、`failed`。
+- 非排位对局标记 `skipped`，失败请求记录 `attempts`、`last_error`、`next_retry_at`。
+
+`raw_matches`
+
+- 排位 match detail 主存储，`match_id` 全局唯一。
+- 保存 `queue_id`、`tft_set_number`、`tft_set_core_name`、`game_version`、`patch`、
+  `game_datetime` 和完整 `raw_json`。
+
+## 配置
+
+全部配置走 `.env`：
 
 | 变量 | 说明 |
 |------|------|
-| `RIOT_API_KEY` | dev key（24h 过期）或 production key |
-| `REGIONS` | 采集服务器；默认 `kr,euw1,na1`，分别覆盖韩服、西欧和北美 |
-| `MIN_TIER` | 种子玩家最低段位；当前为 `GRANDMASTER` |
-| `RATE_PER_SECOND` / `RATE_PER_TWO_MIN` | 限流配额，dev/prod 唯一区别就是这两个数 |
-| `MAX_MATCHES_PER_PLAYER` | 每个种子玩家最多抓多少局 |
+| `RIOT_API_KEY` | Riot dev key 或 production key |
+| `DATABASE_URL` | 数据库连接；生产建议 PostgreSQL |
+| `REGIONS` | 采集服务器；默认 `kr,euw1,na1` |
+| `MIN_TIER` | 种子玩家最低段位；当前支持 `GRANDMASTER` |
+| `RATE_PER_SECOND` / `RATE_PER_TWO_MIN` | Riot API 限流配额 |
+| `MAX_MATCHES_PER_PLAYER` | 每个种子玩家每轮发现多少个最近 match id |
+| `FETCH_BATCH_SIZE` | 每轮 fetch worker 处理多少个待抓 match |
+| `RANKED_QUEUE_ID` | TFT 排位队列，默认 `1100` |
 
-服务器会自动映射到 match-v1 的洲际路由，多服同时采集时无需再手动配置 `ROUTING`。
+## 本地启动
 
-## dev → prod 切换
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-key 和速率全部走 `.env`，**换 Production Key 时不改任何代码**，只调 `RIOT_API_KEY` 和 `RATE_*`。
-
-## 原始 match JSON 结构（供你后续解析参考）
-
+python -m app.core.init_db
+python -m app.collector.seed
+python -m app.collector.discover
+python -m app.collector.collect
 ```
-metadata.match_id
-metadata.participants[]              # PUUID 列表
-info.game_datetime                   # Unix 毫秒
-info.game_version                    # 版本字符串
-info.tft_set_number                  # 当前 Set 号
-info.participants[]
-  ├── puuid / placement(1最好) / level / last_round / gold_left
-  ├── traits[]    { name, num_units, tier_current, style }
-  ├── units[]     { character_id, tier(星级), rarity, items[] }
-  └── augments[]  # 3 个，对应 2-2 / 3-2 / 4-2
+
+## 服务器建议
+
+建议目录：
+
+```text
+/opt/tft-analysis       # 代码
+PostgreSQL              # 采集主库
+systemd timer/worker    # 定时跑 seed/discover/collect
 ```
+
+推荐调度：
+
+- `seed`：每 6-12 小时刷新一次榜单种子。
+- `discover`：每 5-15 分钟发现新 match id。
+- `collect`：每 1 分钟跑一次，或常驻 worker 循环执行。
+
+当前版本过滤不要放在采集入口硬丢数据。采集层保存排位原始 match；后续分析层再按
+`tft_set_number`、`queue_id`、`patch` 做口径过滤。

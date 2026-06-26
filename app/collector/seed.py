@@ -1,16 +1,15 @@
 """种子玩家采集：从各区域宗师和王者榜单拿 PUUID。
 
 对应 tftchamp 的「榜单种子」思路：高分段对局质量高，meta 信号最干净。
-无需 Redis——种子列表落本地 JSON 即可。
+种子直接写入数据库，后续 discovery 从数据库读取。
 """
 import asyncio
-import json
-import os
 
+from app.collector.repository import upsert_seed_players
 from app.core.config import settings
+from app.core.database import SessionLocal, init_db
 from app.core.riot_client import RiotClient
 
-SEED_DIR = "data/seeds"
 TOP_TIER_LOADERS = (
     ("CHALLENGER", "challenger_league"),
     ("GRANDMASTER", "grandmaster_league"),
@@ -54,24 +53,24 @@ async def collect_seeds() -> None:
     if settings.min_tier.upper() != "GRANDMASTER":
         raise ValueError("MIN_TIER 目前只支持 GRANDMASTER")
 
-    os.makedirs(SEED_DIR, exist_ok=True)
+    init_db()
     client = RiotClient()
     try:
         for platform in settings.region_list:
             players = await _grandmaster_plus(client, platform)
-            payload = {
-                "platform": platform,
-                "minimum_tier": "GRANDMASTER",
-                "players": players,
-            }
-            with open(f"{SEED_DIR}/{platform}.json", "w") as f:
-                json.dump(payload, f, ensure_ascii=False)
+            with SessionLocal() as session:
+                saved = upsert_seed_players(
+                    session,
+                    platform=platform,
+                    minimum_tier="GRANDMASTER",
+                    players=players,
+                )
             counts = {
                 tier: sum(p["tier"] == tier for p in players)
                 for tier in TIER_ORDER
             }
             print(
-                f"[seed] {platform}: 宗师/王者 {len(players)} 人 | "
+                f"[seed] {platform}: 写入种子 {saved} 人 | "
                 f"C {counts['CHALLENGER']} / GM {counts['GRANDMASTER']}"
             )
     finally:
