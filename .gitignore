@@ -1,0 +1,17 @@
+# 绝不提交密钥
+.env
+
+# 数据
+data/
+*.csv
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# macOS
+.DS_Store
